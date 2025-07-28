@@ -4,9 +4,9 @@
 # TCPeak.sh - 智能TCP参数优化脚本
 # =============================================================================
 # 开发者: Libyte
-# 版本: 250725
-# 功能: BBR + BBR2 + 自动调度器 + 延迟追踪 + 日志记录
-# 描述: 为VPS服务器提供智能TCP参数调优和sysctl参数自动优化
+# 版本: 250726
+# 功能: 智能TCP参数调优 + sysctl参数优化 + 多服务器性能测试
+# 支持: BBR/BBR2拥塞控制 + 自动队列调度 + 延迟追踪 + 重传率分析
 # =============================================================================
 
 # 显示脚本信息
@@ -15,7 +15,7 @@ show_script_info() {
   echo "                    TCPeak.sh - 智能TCP参数优化脚本"
   echo "============================================================================="
   echo "开发者: Libyte"
-  echo "版本: 250725"
+  echo "版本: 250726"
   echo "功能: 智能TCP参数调优 + sysctl参数优化 + 多服务器性能测试"
   echo "支持: BBR/BBR2拥塞控制 + 自动队列调度 + 延迟追踪 + 重传率分析"
   echo "============================================================================="
@@ -167,9 +167,8 @@ confirm_execution() {
   echo "  • 生成详细的测试报告"
   echo ""
   
-  read -p "是否继续执行? (y/N): " -n 1 -r
-  echo
-  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+  read -p "是否继续执行? (y/N): " choice
+  if [[ ! $choice =~ ^[Yy]$ ]]; then
     echo "❌ 用户取消执行"
     exit 0
   fi
@@ -211,10 +210,59 @@ check_bbr_status() {
 
 ping_test() {
   local ip=$1
-  local avg_rtt=$(ping -c 4 -W 1 "$ip" 2>/dev/null | awk -F'/' '/rtt/ {print $5}' | awk '{print int($1)}')
-  # 如果ping失败，返回默认值
-  [ -z "$avg_rtt" ] && avg_rtt=50
-  echo "$avg_rtt"
+  local port=${2:-5201}  # 默认端口5201，支持自定义
+  
+  echo "🔍 测试服务器连通性: $ip:$port"
+  
+  # 首先尝试ping测试
+  local ping_result=$(ping -c 4 -W 1 "$ip" 2>/dev/null)
+  local ping_success=$?
+  
+  if [ $ping_success -eq 0 ]; then
+    # ping成功，提取RTT
+    local avg_rtt=$(echo "$ping_result" | awk -F'/' '/rtt/ {print $5}' | awk '{print int($1)}')
+    [ -z "$avg_rtt" ] && avg_rtt=50
+    echo "✅ Ping测试成功: 平均RTT ${avg_rtt}ms"
+    echo "$avg_rtt"
+  else
+    # ping失败，提示用户选择
+    echo "⚠️  Ping测试失败: $ip 不可达"
+    echo "💡 提示: 某些iperf3服务器可能禁止ping，但iperf3测试仍可正常进行"
+    echo ""
+    echo "请选择操作:"
+    echo "1. 继续测试 (推荐 - iperf3可能仍可工作)"
+    echo "2. 跳过此服务器"
+    echo "3. 更换测试服务器"
+    echo ""
+    
+    read -p "请输入选择 (1/2/3): " ping_choice
+    
+    case "$ping_choice" in
+      1)
+        echo "✅ 用户选择继续测试，使用默认RTT值50ms"
+        echo "50"
+        ;;
+      2)
+        echo "⏭️  用户选择跳过服务器: $ip"
+        echo "SKIP"
+        ;;
+      3)
+        echo "🔄 用户选择更换服务器"
+        read -p "请输入新的服务器IP: " new_ip
+        if [ -n "$new_ip" ]; then
+          echo "🔄 更换为服务器: $new_ip"
+          ping_test "$new_ip" "$port"
+        else
+          echo "❌ 未输入有效IP，跳过此服务器"
+          echo "SKIP"
+        fi
+        ;;
+      *)
+        echo "❌ 无效选择，跳过此服务器"
+        echo "SKIP"
+        ;;
+    esac
+  fi
 }
 
 check_bbr_status
@@ -367,6 +415,28 @@ auto_detect_performance_mode() {
 
 read -p "输入 iperf3 测试服务器 IP（空格分隔）: " -a IPERF_SERVERS
 
+# 添加iperf3端口配置
+echo ""
+echo "=== iperf3端口配置 ==="
+echo "iperf3默认使用5201端口，您可以选择自定义端口"
+read -p "是否使用自定义端口? (y/N): " port_choice
+
+if [[ $port_choice =~ ^[Yy]$ ]]; then
+  read -p "请输入自定义端口号 (1-65535): " custom_port
+  
+  # 验证端口号
+  if [[ "$custom_port" =~ ^[0-9]+$ ]] && [ "$custom_port" -ge 1 ] && [ "$custom_port" -le 65535 ]; then
+    IPERF3_PORT=$custom_port
+    echo "✅ 已设置自定义端口: $IPERF3_PORT"
+  else
+    echo "❌ 端口号无效，使用默认端口5201"
+    IPERF3_PORT=5201
+  fi
+else
+  IPERF3_PORT=5201
+  echo "✅ 使用默认端口: $IPERF3_PORT"
+fi
+
 CPU_CORES=$(nproc)
 CPU_MHZ=$(awk -F: '/cpu MHz/ {print $2; exit}' /proc/cpuinfo | awk '{print int($1)}')
 MEM_MB=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
@@ -404,11 +474,82 @@ run_speedtest() {
 
 test_tcp_retransmission() {
   local server=$1
-  echo "iperf3 测试 -> $server"
+  local port=${2:-$IPERF3_PORT}  # 使用配置的端口
+  echo "iperf3 测试 -> $server:$port"
   
   # 运行iperf3测试并捕获重传信息
-  local iperf_output=$(iperf3 -c "$server" -t 10 2>&1)
-  local iperf_reverse_output=$(iperf3 -c "$server" -t 10 -R 2>&1)
+  local iperf_output=$(iperf3 -c "$server" -p "$port" -t 10 2>&1)
+  local iperf_reverse_output=$(iperf3 -c "$server" -p "$port" -t 10 -R 2>&1)
+  
+  # 检查iperf3连接是否成功
+  if echo "$iperf_output" | grep -q "Connection refused\|No route to host\|Connection timed out"; then
+    echo "❌ iperf3连接失败: $server:$port"
+    echo "可能原因:"
+    echo "  • 服务器未运行iperf3服务"
+    echo "  • 端口号不正确"
+    echo "  • 防火墙阻止连接"
+    echo ""
+    echo "请选择操作:"
+    echo "1. 尝试其他端口"
+    echo "2. 跳过此服务器"
+    echo "3. 更换服务器"
+    echo ""
+    
+    read -p "请输入选择 (1/2/3): " iperf_choice
+    
+    case "$iperf_choice" in
+      1)
+        read -p "请输入新端口号: " new_port
+        if [[ "$new_port" =~ ^[0-9]+$ ]] && [ "$new_port" -ge 1 ] && [ "$new_port" -le 65535 ]; then
+          echo "🔄 尝试端口: $new_port"
+          test_tcp_retransmission "$server" "$new_port"
+          return
+        else
+          echo "❌ 端口号无效，跳过此服务器"
+          # 设置标志表示测试失败
+          UL_SPEED=0
+          DL_SPEED=0
+          AVG_IPERF=0
+          RETRANS_RATE=0
+          return
+        fi
+        ;;
+      2)
+        echo "⏭️  跳过服务器: $server"
+        # 设置标志表示跳过
+        UL_SPEED=0
+        DL_SPEED=0
+        AVG_IPERF=0
+        RETRANS_RATE=0
+        return
+        ;;
+      3)
+        read -p "请输入新服务器IP: " new_server
+        if [ -n "$new_server" ]; then
+          echo "🔄 更换为服务器: $new_server"
+          test_tcp_retransmission "$new_server" "$port"
+          return
+        else
+          echo "❌ 未输入有效IP，跳过此服务器"
+          # 设置标志表示测试失败
+          UL_SPEED=0
+          DL_SPEED=0
+          AVG_IPERF=0
+          RETRANS_RATE=0
+          return
+        fi
+        ;;
+      *)
+        echo "❌ 无效选择，跳过此服务器"
+        # 设置标志表示测试失败
+        UL_SPEED=0
+        DL_SPEED=0
+        AVG_IPERF=0
+        RETRANS_RATE=0
+        return
+        ;;
+    esac
+  fi
   
   # 调试：显示iperf3输出
   echo "iperf3上行输出:"
@@ -1339,7 +1480,39 @@ for server in "${IPERF_SERVERS[@]}"; do
     VALID_SERVERS+=("$server")
     echo "  ✅ $server: 可达"
   else
-    echo "  ❌ $server: 不可达 (将跳过)"
+    echo "  ❌ $server: 不可达"
+    echo "💡 提示: 某些iperf3服务器可能禁止ping，但iperf3测试仍可正常进行"
+    echo ""
+    echo "请选择操作:"
+    echo "1. 继续测试此服务器 (推荐)"
+    echo "2. 跳过此服务器"
+    echo "3. 更换此服务器"
+    echo ""
+    
+    read -p "请输入选择 (1/2/3): " pre_ping_choice
+    
+    case "$pre_ping_choice" in
+      1)
+        VALID_SERVERS+=("$server")
+        echo "✅ 用户选择继续测试: $server"
+        ;;
+      2)
+        echo "⏭️  用户选择跳过: $server"
+        ;;
+      3)
+        echo "🔄 用户选择更换服务器"
+        read -p "请输入新的服务器IP: " new_pre_ip
+        if [ -n "$new_pre_ip" ]; then
+          VALID_SERVERS+=("$new_pre_ip")
+          echo "🔄 更换为服务器: $new_pre_ip"
+        else
+          echo "❌ 未输入有效IP，跳过此服务器"
+        fi
+        ;;
+      *)
+        echo "❌ 无效选择，跳过此服务器"
+        ;;
+    esac
   fi
 done
 
@@ -1361,6 +1534,16 @@ for round in {1..3}; do
   for server in "${IPERF_SERVERS[@]}"; do
     echo "🔍 测试服务器: $server (第 $round 轮)"
     
+    # 先进行ping测试
+    PING_RTT=$(ping_test "$server")
+    
+    # 检查是否跳过此服务器
+    if [ "$PING_RTT" = "SKIP" ]; then
+      echo "⏭️  跳过服务器: $server"
+      continue
+    fi
+    
+    # 进行iperf3测试
     test_tcp_retransmission "$server"
     
     # 根据VPS类型选择不同的参考指标
@@ -1386,12 +1569,16 @@ for round in {1..3}; do
         ;;
     esac
     
-    PING_RTT=$(ping_test "$server")
-    
     # 确保变量不为空，避免计算错误
     [ -z "$REF_BW" ] && REF_BW=0
     [ -z "$RETRANS_RATE" ] && RETRANS_RATE=0
     [ -z "$PING_RTT" ] && PING_RTT=0
+    
+    # 检查测试是否成功
+    if [ "$UL_SPEED" -eq 0 ] && [ "$DL_SPEED" -eq 0 ]; then
+      echo "⚠️  测试失败或跳过: $server"
+      continue
+    fi
     
     # 跳过异常值和无效数据
     if [ "$REF_BW" -gt 10000 ] || [ "$REF_BW" -eq 0 ]; then
@@ -1702,6 +1889,6 @@ echo "  • 运行性能测试验证优化效果"
 echo "  • 监控系统稳定性"
 echo ""
 echo "  开发者: Libyte"
-echo "  版本: 250725"
+echo "  版本: 250726"
 echo "  脚本: TCPeak.sh"
 echo "============================================================================="

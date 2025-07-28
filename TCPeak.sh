@@ -210,7 +210,7 @@ check_bbr_status() {
 
 ping_test() {
   local ip=$1
-  local port=${2:-5201}  # 默认端口5201，支持自定义
+  local port=${2:-${SERVER_PORTS[$ip]}}  # 使用该服务器的配置端口
   
   echo "🔍 测试服务器连通性: $ip:$port"
   
@@ -251,7 +251,7 @@ ping_test() {
         read -p "请输入新的服务器IP: " new_ip
         if [ -n "$new_ip" ]; then
           echo "🔄 更换为服务器: $new_ip"
-          ping_test "$new_ip" "$port"
+          ping_test "$new_ip" "${SERVER_PORTS[$new_ip]:-5201}"
         else
           echo "❌ 未输入有效IP，跳过此服务器"
           echo "SKIP"
@@ -413,28 +413,79 @@ auto_detect_performance_mode() {
   echo "========================="
 }
 
-read -p "输入 iperf3 测试服务器 IP（空格分隔）: " -a IPERF_SERVERS
-
-# 添加iperf3端口配置
+# 询问是否使用默认端口
 echo ""
 echo "=== iperf3端口配置 ==="
-echo "iperf3默认使用5201端口，您可以选择自定义端口"
-read -p "是否使用自定义端口? (y/N): " port_choice
+read -p "是否使用默认端口5201? (y/N): " use_default_port
 
-if [[ $port_choice =~ ^[Yy]$ ]]; then
-  read -p "请输入自定义端口号 (1-65535): " custom_port
+if [[ $use_default_port =~ ^[Yy]$ ]]; then
+  # 使用默认端口，输入IP地址
+  read -p "输入 iperf3 测试服务器 IP（空格分隔）: " -a IPERF_SERVERS
   
-  # 验证端口号
-  if [[ "$custom_port" =~ ^[0-9]+$ ]] && [ "$custom_port" -ge 1 ] && [ "$custom_port" -le 65535 ]; then
-    IPERF3_PORT=$custom_port
-    echo "✅ 已设置自定义端口: $IPERF3_PORT"
-  else
-    echo "❌ 端口号无效，使用默认端口5201"
-    IPERF3_PORT=5201
-  fi
+  # 初始化服务器端口数组，所有服务器使用默认端口5201
+  declare -A SERVER_PORTS
+  for server in "${IPERF_SERVERS[@]}"; do
+    SERVER_PORTS["$server"]=5201
+  done
+  
+  echo "✅ 使用默认端口5201"
+  echo ""
+  echo "=== 端口配置摘要 ==="
+  for server in "${IPERF_SERVERS[@]}"; do
+    echo "  $server -> 端口 5201"
+  done
+  echo "===================="
 else
-  IPERF3_PORT=5201
-  echo "✅ 使用默认端口: $IPERF3_PORT"
+  # 使用自定义端口，输入ip:port格式
+  echo ""
+  echo "请输入服务器地址，格式: ip:port"
+  echo "示例: 192.168.1.100:5201 10.0.0.50:5202 172.16.0.25:5203"
+  echo "注意: 多个服务器用空格分隔"
+  echo ""
+  
+  read -p "输入服务器地址: " server_input
+  
+  # 解析ip:port格式
+  declare -a IPERF_SERVERS
+  declare -A SERVER_PORTS
+  
+  # 分割输入字符串
+  IFS=' ' read -ra SERVER_ENTRIES <<< "$server_input"
+  
+  for entry in "${SERVER_ENTRIES[@]}"; do
+    if [[ "$entry" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+$ ]]; then
+      # 提取IP和端口
+      ip=$(echo "$entry" | cut -d: -f1)
+      port=$(echo "$entry" | cut -d: -f2)
+      
+      # 验证端口号
+      if [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
+        IPERF_SERVERS+=("$ip")
+        SERVER_PORTS["$ip"]=$port
+        echo "✅ 解析成功: $ip -> 端口 $port"
+      else
+        echo "❌ 端口号无效: $port (应为1-65535)"
+        echo "跳过: $entry"
+      fi
+    else
+      echo "❌ 格式错误: $entry (应为 ip:port 格式)"
+      echo "跳过: $entry"
+    fi
+  done
+  
+  # 检查是否有有效的服务器
+  if [ ${#IPERF_SERVERS[@]} -eq 0 ]; then
+    echo "❌ 错误：没有有效的服务器地址！"
+    echo "请重新运行脚本并输入正确的格式"
+    exit 1
+  fi
+  
+  echo ""
+  echo "=== 端口配置摘要 ==="
+  for server in "${IPERF_SERVERS[@]}"; do
+    echo "  $server -> 端口 ${SERVER_PORTS[$server]}"
+  done
+  echo "===================="
 fi
 
 CPU_CORES=$(nproc)
@@ -474,7 +525,7 @@ run_speedtest() {
 
 test_tcp_retransmission() {
   local server=$1
-  local port=${2:-$IPERF3_PORT}  # 使用配置的端口
+  local port=${2:-${SERVER_PORTS[$server]}}  # 使用该服务器的配置端口
   echo "iperf3 测试 -> $server:$port"
   
   # 运行iperf3测试并捕获重传信息
@@ -527,7 +578,7 @@ test_tcp_retransmission() {
         read -p "请输入新服务器IP: " new_server
         if [ -n "$new_server" ]; then
           echo "🔄 更换为服务器: $new_server"
-          test_tcp_retransmission "$new_server" "$port"
+          test_tcp_retransmission "$new_server" "${SERVER_PORTS[$new_server]:-5201}"
           return
         else
           echo "❌ 未输入有效IP，跳过此服务器"
@@ -754,7 +805,7 @@ test_tcp_retransmission() {
   else
   AVG_IPERF=$(( (DL_SPEED + UL_SPEED) / 2 ))
   fi
-  PING_RTT=$(ping_test "$server")
+  PING_RTT=$(ping_test "$server" "${SERVER_PORTS[$server]}")
   
   echo "UL: ${UL_SPEED}Mbps, DL: ${DL_SPEED}Mbps, AVG: ${AVG_IPERF}Mbps, RTT: ${PING_RTT}ms"
   echo "重传统计: UL重传=$ul_retrans, DL重传=$dl_retrans, 平均重传率=${RETRANS_RATE}%"
@@ -1504,7 +1555,9 @@ for server in "${IPERF_SERVERS[@]}"; do
         read -p "请输入新的服务器IP: " new_pre_ip
         if [ -n "$new_pre_ip" ]; then
           VALID_SERVERS+=("$new_pre_ip")
-          echo "🔄 更换为服务器: $new_pre_ip"
+          # 为新服务器设置默认端口
+          SERVER_PORTS["$new_pre_ip"]=5201
+          echo "🔄 更换为服务器: $new_pre_ip (使用默认端口5201)"
         else
           echo "❌ 未输入有效IP，跳过此服务器"
         fi
@@ -1535,7 +1588,7 @@ for round in {1..3}; do
     echo "🔍 测试服务器: $server (第 $round 轮)"
     
     # 先进行ping测试
-    PING_RTT=$(ping_test "$server")
+    PING_RTT=$(ping_test "$server" "${SERVER_PORTS[$server]}")
     
     # 检查是否跳过此服务器
     if [ "$PING_RTT" = "SKIP" ]; then

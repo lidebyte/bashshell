@@ -13,8 +13,8 @@ SERVICE_NAME="tcp-ping"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 DEFAULT_PORT=9966
 DEFAULT_HOST="0.0.0.0"
-PYTHON_SCRIPT="tcp_ping_server.py"
-CLIENT_SCRIPT="tcp_ping_client.py"
+PYTHON_SCRIPT="tcpping_server.py"
+CLIENT_SCRIPT="tcpping_client.py"
 
 # 颜色定义
 RED='\033[0;31m'

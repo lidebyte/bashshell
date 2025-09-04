@@ -8,8 +8,8 @@
 set -e
 
 # 配置变量
-SCRIPT_DIR="/opt/tcp-ping"
-SERVICE_NAME="tcp-ping"
+SCRIPT_DIR="/opt/tcpping"
+SERVICE_NAME="tcpping"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 DEFAULT_PORT=9966
 DEFAULT_HOST="0.0.0.0"
